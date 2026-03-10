@@ -1,0 +1,61 @@
+{
+  "project": {
+    "name": "weather-sim",
+    "version": "1.4.0",
+    "description": "Weather simulation configuration"
+  },
+  "scenarios": [
+    {
+      "id": "scenario_01",
+      "name": "Summer Clear",
+      "weather": "sunny",
+      "temperature": 28.5,
+      "wind_speed": 12,
+      "metadata": {
+        "enabled": true,
+        "priority": 1
+      }
+    },
+    {
+      "id": "scenario_02",
+      "name": "Winter Storm",
+      "weather": "blizzard",
+      "temperature": -8.0,
+      "wind_speed": 65,
+      "metadata": {
+        "enabled": true,
+        "priority": 2
+      }
+    },
+    {
+      "id": "scenario_03",
+      "name": "Autumn Rain",
+      "weather": "rainy",
+      "temperature": 14.0,
+      "wind_speed": 20,
+      "metadata": {
+        "enabled": false,
+        "priority": 3
+      }
+    }
+  ],
+  "sensors": [
+    {
+      "id": "sensor_temp_01",
+      "type": "temperature",
+      "unit": "celsius",
+      "calibration_offset": 0.0
+    },
+    {
+      "id": "sensor_wind_01",
+      "type": "anemometer",
+      "unit": "km/h",
+      "calibration_offset": 0.5
+    }
+  ],
+  "output": {
+    "format": "json",
+    "directory": "./results",
+    "log_level": "info"
+  }
+}
