@@ -45,10 +45,26 @@ JSON Pointer rules:
   • Use "-" to append to an array: /array/-
   • Escape "/" in key names as "~1"; escape "~" as "~0"
 
+═══ CHOOSING op: add vs op: replace ════════════════════════════════════════
+  • Use "replace" ONLY when the key or array index already exists in the excerpt.
+  • Use "add" when the key does not yet exist — even if the instruction says
+    "set", "update", or "change". If the path is absent from the excerpt, it
+    must be added, not replaced.
+  • Use "add" with a path ending in "/-" to append a new item to an array.
+  • When in doubt, check the excerpt: if the key is missing, use "add".
+
+═══ PATH GROUNDING RULES ════════════════════════════════════════════════════
+  • The CONTEXT SUMMARY contains "Available JSON paths" — ALL paths that exist.
+  • NEVER construct a path from words in the instruction. Natural language
+    (e.g. "date", "title") may NOT match any field name exactly.
+  • ALWAYS find the semantically matching path in the path inventory.
+    Example: "update the date" → use "/project/start_date", NOT "/date".
+  • If no path in the inventory matches the intent, output an empty array: [].
+  • NEVER invent a path segment that does not appear in the path inventory.
+
 ═══ OUTPUT RULES ════════════════════════════════════════════════════════════
   • Output ONLY the raw JSON array — no explanation, no prose, no fences.
   • Use the EXACT paths visible in the JSON excerpt below.
-  • Do NOT invent paths that are not present in the excerpt.
   • Do NOT output the full config — only the minimal patch needed.
   • If the instruction cannot be satisfied safely, output an empty array: []
 """
@@ -69,7 +85,8 @@ _USER_TMPL = """\
 {json_excerpt}
 
 === YOUR TASK ===
-Output the JSON patch array that fulfils the instruction above.\
+Using ONLY paths from the "Available JSON paths" list in the context summary,
+output the JSON patch array that fulfils the instruction above.\
 """
 
 _RETRY_TMPL = """\
@@ -240,17 +257,40 @@ class PatchEngine:
                 errors=errors,
             )
 
-        # ── Step 5: Apply patch ──────────────────────────────────────────────
+        # ── Step 5: Apply patch (with enriched retry on failure) ────────────
+        apply_error: str | None = None
         try:
             patched = jsonpatch.apply_patch(working_copy, patch, in_place=False)
         except (jsonpatch.JsonPatchException, jsonpatch.JsonPointerException) as exc:
-            return ApplyResult(
-                patch=patch,
-                patched_config=working_copy,
-                diff_snippet="",
-                success=False,
-                errors=[f"Patch application error: {exc}"],
+            apply_error = _enrich_apply_error(str(exc), patch, working_copy)
+
+        if apply_error:
+            logger.info("Patch apply failed; retrying with enriched error report.")
+            retry_apply_msg = _RETRY_TMPL.format(
+                instruction=instruction,
+                context_summary=context_summary,
+                json_excerpt=json.dumps(json_excerpt, indent=2),
+                error_report=apply_error,
             )
+            patch, gen_errors2 = self._call_and_validate(system_prompt, retry_apply_msg)
+            if gen_errors2:
+                return ApplyResult(
+                    patch=patch,
+                    patched_config=working_copy,
+                    diff_snippet="",
+                    success=False,
+                    errors=[apply_error] + gen_errors2,
+                )
+            try:
+                patched = jsonpatch.apply_patch(working_copy, patch, in_place=False)
+            except (jsonpatch.JsonPatchException, jsonpatch.JsonPointerException) as exc2:
+                return ApplyResult(
+                    patch=patch,
+                    patched_config=working_copy,
+                    diff_snippet="",
+                    success=False,
+                    errors=[_enrich_apply_error(str(exc2), patch, working_copy)],
+                )
 
         # ── Step 6: Validate patched config ─────────────────────────────────
         validation_errors = self._validate_config(patched)
@@ -395,6 +435,38 @@ class PatchEngine:
 def _deep_copy(obj: Any) -> Any:
     """Deep copy via JSON round-trip (safe for all JSON-serialisable data)."""
     return json.loads(json.dumps(obj))
+
+
+def _enrich_apply_error(
+    raw_error: str,
+    patch_ops: list[dict],
+    config: dict | list,
+) -> str:
+    """Translate a raw jsonpatch error into actionable model guidance.
+
+    For each ``replace`` operation whose target path does not exist in
+    *config*, appends a specific hint telling the model to use ``add``
+    instead.  Other errors are passed through with no hint.
+
+    Args:
+        raw_error: The string representation of the caught exception.
+        patch_ops: The patch operations that were attempted.
+        config: The config state before the patch was applied.
+
+    Returns:
+        An error string suitable for inclusion in an ``error_report``.
+    """
+    lines: list[str] = [f"Patch application error: {raw_error}"]
+    for op in patch_ops:
+        if op.get("op") == "replace":
+            path = op.get("path", "")
+            val = resolve_pointer(config, path, _MISSING)
+            if val is _MISSING:
+                lines.append(
+                    f"  • op=replace at '{path}' failed because that path does not "
+                    f"exist in the config. Use op=add instead of op=replace."
+                )
+    return "\n".join(lines)
 
 
 def _build_diff_snippet(

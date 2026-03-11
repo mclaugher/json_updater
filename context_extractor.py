@@ -13,6 +13,10 @@ from schema_infer import infer_schema, summarize_schema
 
 # Maximum number of JSON lines to include in the excerpt sent to the model.
 _MAX_EXCERPT_LINES = 50
+# Hard cap on entries in the path inventory appended to context_summary.
+_MAX_PATH_ENTRIES = 150
+# Maximum array indices traversed per array when building the path inventory.
+_MAX_ARRAY_ITEMS = 5
 
 
 def extract_context(
@@ -147,8 +151,58 @@ def _trim_list_to_budget(items: list) -> list:
     return items
 
 
+def _enumerate_paths(
+    node: Any,
+    prefix: str = "",
+    max_paths: int = _MAX_PATH_ENTRIES,
+) -> list[str]:
+    """Recursively enumerate all JSON Pointer paths in *node*.
+
+    Returns a flat list of strings.  Scalar leaves include their current value
+    inline (e.g. ``/project/start_date = "2024-01-01"``).  Arrays are
+    traversed for at most ``_MAX_ARRAY_ITEMS`` indices.  The total list is
+    capped at *max_paths* entries; a sentinel line is appended when truncated.
+
+    Args:
+        node: The JSON-compatible value to walk.
+        prefix: Current JSON Pointer prefix (empty string for the root).
+        max_paths: Hard cap on the number of result lines.
+
+    Returns:
+        A list of path strings suitable for inclusion in a prompt.
+    """
+    result: list[str] = []
+
+    def _walk(current: Any, ptr: str) -> None:
+        if len(result) >= max_paths:
+            return
+        if isinstance(current, dict):
+            for key, value in current.items():
+                if len(result) >= max_paths:
+                    break
+                _walk(value, f"{ptr}/{key}")
+        elif isinstance(current, list):
+            total = len(current)
+            limit = min(total, _MAX_ARRAY_ITEMS)
+            for i in range(limit):
+                if len(result) >= max_paths:
+                    break
+                _walk(current[i], f"{ptr}/{i}")
+            if total > _MAX_ARRAY_ITEMS and len(result) < max_paths:
+                result.append(f"{ptr}/… ({total} items, first {_MAX_ARRAY_ITEMS} shown)")
+        else:
+            result.append(f"{ptr} = {json.dumps(current)}")
+
+    _walk(node, prefix)
+
+    if len(result) >= max_paths:
+        result.append(f"… (truncated, {max_paths} paths shown)")
+
+    return result
+
+
 def _build_context_summary(config: dict | list, schema_summary: str) -> str:
-    """Combine schema summary with top-level key listing."""
+    """Combine schema summary, top-level key listing, and full path inventory."""
     lines = [schema_summary, ""]
     if isinstance(config, dict):
         keys = list(config.keys())
@@ -158,4 +212,10 @@ def _build_context_summary(config: dict | list, schema_summary: str) -> str:
         if config and isinstance(config[0], dict):
             sample_keys = list(config[0].keys())
             lines.append(f"Item keys (sample): {', '.join(sample_keys)}")
+
+    lines.append("")
+    lines.append("Available JSON paths (use these verbatim as patch path values):")
+    for entry in _enumerate_paths(config):
+        lines.append(f"  {entry}")
+
     return "\n".join(lines)
