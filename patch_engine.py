@@ -20,7 +20,7 @@ from jsonpointer import JsonPointerException, resolve_pointer
 
 from context_extractor import extract_context
 from ollama_client import OllamaClient
-from patch_schema import PATCH_ARRAY_SCHEMA, validate_patch
+from patch_schema import OLLAMA_PATCH_ARRAY_SCHEMA, PATCH_ARRAY_SCHEMA, validate_patch
 from schema_infer import load_and_infer, summarize_schema
 from skills import collect_validators, discover_skills, merge_skill_instructions
 
@@ -137,7 +137,7 @@ class PatchEngine:
     def __init__(
         self,
         config_paths: list[Path],
-        model: str = "llama3",
+        model: str = "gemma2:9b",
         host: str = "http://localhost:11434",
         project_dir: Path | None = None,
         skill_names: list[str] | None = None,
@@ -344,7 +344,7 @@ class PatchEngine:
             raw = self.ollama.chat(
                 system=system_prompt,
                 user=user_message,
-                format_schema=PATCH_ARRAY_SCHEMA,
+                format_schema=OLLAMA_PATCH_ARRAY_SCHEMA,
             )
         except Exception as exc:  # noqa: BLE001
             return [], [f"Ollama call failed: {exc}"]

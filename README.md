@@ -19,12 +19,12 @@ pip install -r requirements.txt
 
 ```bash
 # macOS / Linux — see https://ollama.com/download
-ollama pull llama3        # recommended default; ~4 GB
+ollama pull gemma2:9b     # recommended default; ~5 GB
 ollama serve              # keep this running in a separate terminal
 ```
 
 **Recommended models** (must support structured outputs / JSON mode):
-- `llama3` — good balance of speed and quality, default
+- `gemma2:9b` — good balance of speed and quality, default
 - `mistral` — fast, works well for simple edits
 - `llama3.1:8b` — more capable for complex patches
 - `qwen2.5-coder` — strong for structured/JSON tasks
@@ -178,7 +178,7 @@ Global options:
 
 Subcommands:
   edit                Interactive edit loop
-    --model MODEL     Ollama model name (default: llama3)
+    --model MODEL     Ollama model name (default: gemma2:9b)
     --host  URL       Ollama server URL (default: http://localhost:11434)
     --skill-name NAME Activate only this skill (by file stem, repeatable)
 

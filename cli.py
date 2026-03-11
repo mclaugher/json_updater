@@ -273,8 +273,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     edit_parser.add_argument(
         "--model",
-        default="llama3",
-        help="Ollama model name (default: llama3).",
+        default="gemma2:9b",
+        help="Ollama model name (default: gemma2:9b).",
     )
     edit_parser.add_argument(
         "--host",

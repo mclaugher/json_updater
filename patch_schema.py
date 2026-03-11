@@ -43,6 +43,24 @@ PATCH_ARRAY_SCHEMA: dict = {
     "minItems": 1,
 }
 
+# Simplified schema sent to Ollama.  llama.cpp's JSON-schema → grammar
+# converter does not support `if`/`then`, bare `description`-only properties,
+# or `minItems`, so we strip those features here.  Full validation against
+# PATCH_ARRAY_SCHEMA still runs locally after the model responds.
+OLLAMA_PATCH_ARRAY_SCHEMA: dict = {
+    "type": "array",
+    "items": {
+        "type": "object",
+        "required": ["op", "path"],
+        "properties": {
+            "op":    {"type": "string", "enum": ["add", "remove", "replace"]},
+            "path":  {"type": "string"},
+            "value": {},  # any JSON type; presence enforced by local validate_patch
+        },
+        "additionalProperties": False,
+    },
+}
+
 
 def validate_patch(patch: list[dict]) -> None:
     """Validate a patch array against PATCH_ARRAY_SCHEMA.

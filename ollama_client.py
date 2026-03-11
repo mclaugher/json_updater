@@ -17,7 +17,7 @@ import requests
 logger = logging.getLogger(__name__)
 
 _DEFAULT_HOST = "http://localhost:11434"
-_DEFAULT_MODEL = "llama3"
+_DEFAULT_MODEL = "gemma2:9b"
 _MAX_RETRIES = 2
 _RETRY_DELAY = 1.5  # seconds between retries
 
@@ -39,7 +39,7 @@ class OllamaClient:
     object.
 
     Args:
-        model: Name of the Ollama model to use (e.g. ``"llama3"``).
+        model: Name of the Ollama model to use (e.g. ``"gemma2:9b"``).
         host: Base URL of the Ollama server (default: ``"http://localhost:11434"``).
     """
 

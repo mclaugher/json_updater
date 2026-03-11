@@ -39,7 +39,7 @@ def _make_engine(config: dict, patch_response: list[dict]) -> PatchEngine:
 
     engine = PatchEngine(
         config_paths=[tmp_path],
-        model="llama3",
+        model="gemma2:9b",
         host="http://localhost:11434",
         project_dir=Path(tempfile.gettempdir()),
     )
