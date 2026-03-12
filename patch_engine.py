@@ -53,6 +53,16 @@ JSON Pointer rules:
   • Use "add" with a path ending in "/-" to append a new item to an array.
   • When in doubt, check the excerpt: if the key is missing, use "add".
 
+═══ VALUE TYPE RULES ════════════════════════════════════════════════════════
+  • The CURRENT VALUES section shows the existing value and type at each
+    target path.
+  • Your replacement value MUST match that type (string → string, number →
+    number, boolean → boolean, array → array, object → object) unless the
+    instruction explicitly requests a different type.
+  • NEVER wrap a scalar value in an object. If the current value is the
+    string "2024-01-01", your patch value must be a bare string like
+    "2025-12-08", NOT {"start_date": "2025-12-08"}.
+
 ═══ PATH GROUNDING RULES ════════════════════════════════════════════════════
   • The CONTEXT SUMMARY contains "Available JSON paths" — ALL paths that exist.
   • NEVER construct a path from words in the instruction. Natural language
@@ -84,6 +94,9 @@ _USER_TMPL = """\
 (Use the paths visible here. Array indices start at 0.)
 {json_excerpt}
 
+=== CURRENT VALUES AT TARGET PATHS ===
+{current_values}
+
 === YOUR TASK ===
 Using ONLY paths from the "Available JSON paths" list in the context summary,
 output the JSON patch array that fulfils the instruction above.\
@@ -98,6 +111,9 @@ _RETRY_TMPL = """\
 
 === JSON EXCERPT ===
 {json_excerpt}
+
+=== CURRENT VALUES AT TARGET PATHS ===
+{current_values}
 
 === ERROR REPORT (previous attempt was rejected) ===
 {error_report}
@@ -285,12 +301,17 @@ class PatchEngine:
         # context_summary always built the same way (includes full path inventory)
         _, context_summary = extract_context(working_copy, instruction)
 
+        # Computed once; reused by all retry calls (working_copy is never mutated
+        # until after successful validation).
+        current_values = _format_current_values(relevant_paths, working_copy)
+
         # ── Step 2: Prompts ─────────────────────────────────────────────────
         system_prompt = self._build_system_prompt()
         user_message = _USER_TMPL.format(
             instruction=instruction,
             context_summary=context_summary,
             json_excerpt=json.dumps(json_excerpt, indent=2),
+            current_values=current_values,
         )
 
         # ── Step 3–4: Generate + validate patch ─────────────────────────────
@@ -301,6 +322,7 @@ class PatchEngine:
                 instruction=instruction,
                 context_summary=context_summary,
                 json_excerpt=json.dumps(json_excerpt, indent=2),
+                current_values=current_values,
                 error_report="\n".join(errors),
             )
             patch, errors = self._call_and_validate(system_prompt, retry_msg)
@@ -327,6 +349,7 @@ class PatchEngine:
                 instruction=instruction,
                 context_summary=context_summary,
                 json_excerpt=json.dumps(json_excerpt, indent=2),
+                current_values=current_values,
                 error_report=apply_error,
             )
             patch, gen_errors2 = self._call_and_validate(system_prompt, retry_apply_msg)
@@ -357,6 +380,7 @@ class PatchEngine:
                 instruction=instruction,
                 context_summary=context_summary,
                 json_excerpt=json.dumps(json_excerpt, indent=2),
+                current_values=current_values,
                 error_report="\n".join(validation_errors),
             )
             patch2, gen_errors2 = self._call_and_validate(system_prompt, retry_msg2)
@@ -539,6 +563,47 @@ class PatchEngine:
 # ---------------------------------------------------------------------------
 # Module-level utilities
 # ---------------------------------------------------------------------------
+
+
+def _type_name(v: object) -> str:
+    """Return the JSON type name of *v* as a human-readable string.
+
+    ``bool`` is checked before ``int`` because in Python ``bool`` is a
+    subclass of ``int`` and would otherwise be misclassified as "number".
+    """
+    if isinstance(v, bool):  return "boolean"
+    if isinstance(v, int):   return "number"
+    if isinstance(v, float): return "number"
+    if isinstance(v, str):   return "string"
+    if isinstance(v, list):  return "array"
+    if isinstance(v, dict):  return "object"
+    return "null"
+
+
+def _format_current_values(paths: list[str], config: dict | list) -> str:
+    """Build the CURRENT VALUES section for the patch generation prompt.
+
+    For each path in *paths*, resolves the current value against *config*
+    and emits a line showing the value and its JSON type.  Paths that do
+    not yet exist are flagged as new additions.
+
+    Args:
+        paths: JSON Pointer strings identified by the analysis pass.
+        config: The in-memory config before any patch is applied.
+
+    Returns:
+        A multi-line string ready for insertion into the prompt.
+    """
+    if not paths:
+        return "  (no target paths identified)"
+    lines: list[str] = []
+    for ptr in paths:
+        val = resolve_pointer(config, ptr, _MISSING)
+        if val is _MISSING:
+            lines.append(f"  {ptr}  (does not exist yet — use op: add)")
+        else:
+            lines.append(f"  {ptr} = {json.dumps(val)}  (type: {_type_name(val)})")
+    return "\n".join(lines)
 
 
 def _deep_copy(obj: Any) -> Any:

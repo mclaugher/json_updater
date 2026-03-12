@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from patch_engine import ApplyResult, PatchEngine, _deep_copy
+from patch_engine import ApplyResult, PatchEngine, _deep_copy, _format_current_values, _type_name
 
 
 # ---------------------------------------------------------------------------
@@ -340,3 +340,57 @@ def test_analyse_rejects_hallucinated_paths():
         assert engine.ollama.chat.call_count == 2
     finally:
         engine._tmp_path.unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# _type_name and _format_current_values
+# ---------------------------------------------------------------------------
+
+
+def test_type_name_bool_not_number():
+    """bool must be classified as 'boolean', not 'number' (bool subclasses int)."""
+    assert _type_name(True) == "boolean"
+    assert _type_name(False) == "boolean"
+    assert _type_name(1) == "number"
+    assert _type_name(3.14) == "number"
+    assert _type_name("hello") == "string"
+    assert _type_name([]) == "array"
+    assert _type_name({}) == "object"
+    assert _type_name(None) == "null"
+
+
+def test_current_values_in_patch_prompt():
+    """Patch generation call must include the path and type for identified paths."""
+    config = {"project": {"name": "acme", "start_date": "2024-01-01"}}
+    analysis = {"relevant_paths": ["/project/start_date"], "reasoning": "date field"}
+    patch_resp = [{"op": "replace", "path": "/project/start_date", "value": "2025-12-08"}]
+
+    with tempfile.NamedTemporaryFile(suffix=".json", mode="w", delete=False) as f:
+        json.dump(config, f)
+        tmp_path = Path(f.name)
+
+    engine = PatchEngine(
+        config_paths=[tmp_path],
+        model="gemma2:9b",
+        host="http://localhost:11434",
+        project_dir=Path(tempfile.gettempdir()),
+    )
+    engine._tmp_path = tmp_path
+    engine.ollama = MagicMock()
+    engine.ollama.chat.side_effect = [analysis, patch_resp]
+    try:
+        result = engine.run("update start_date to 2025-12-08")
+        assert result.success, result.errors
+        # The user message for the patch call (call index 1) must show path + type
+        patch_call_user = engine.ollama.chat.call_args_list[1][1]["user"]
+        assert "/project/start_date" in patch_call_user
+        assert "string" in patch_call_user
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
+def test_current_values_nonexistent_path():
+    """When a path doesn't exist in the config, the prompt flags it as a new addition."""
+    result = _format_current_values(["/project/new_field"], {"project": {"name": "x"}})
+    assert "does not exist yet" in result
+    assert "op: add" in result
