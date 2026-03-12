@@ -83,14 +83,25 @@ The original JSON files are **never modified**.  Patched output goes to
 
 1. **Schema inference** — on startup, all `*.json` files in the project directory
    are scanned and a JSON Schema is inferred automatically.
-2. **Context extraction** — only the relevant portion of the config is sent to
-   the model (keyword-matched subtrees, capped at ~50 lines).
-3. **Patch generation** — Ollama is called with your instruction and a structured
-   output schema that forces it to emit a JSON Patch array.
-4. **Validation** — the patch is validated against the RFC 6902 schema, applied
-   to an in-memory copy, and then re-validated against the inferred schema.
-5. **Review & confirm** — you see the patch and a before/after diff before anything
-   is written.
+2. **Analysis pass** — before generating any patch, the model receives the full
+   path inventory (every JSON Pointer in the config with its current value) and
+   identifies which paths correspond to your instruction.  You can say "update the
+   date" and the model will find `/project/start_date` — you don't need to know
+   the exact field name.  If the analysis pass fails or returns no matches, the
+   engine falls back to keyword-based excerpt selection automatically.
+3. **Excerpt building** — the paths identified in step 2 are resolved to their
+   parent subtrees, producing a focused JSON excerpt (capped at ~50 lines) that
+   is sent alongside the instruction for patch generation.
+4. **Patch generation** — Ollama is called with the instruction, the excerpt, and
+   a structured output schema that forces it to emit a JSON Patch array.  The
+   model is grounded to use only paths from the inventory — it cannot invent path
+   segments from your instruction's words.
+5. **Validation** — the patch is validated against the RFC 6902 schema, applied
+   to an in-memory copy, and then re-validated against the inferred schema.  If
+   apply fails (e.g. `replace` on a non-existent key), the engine diagnoses the
+   error, tells the model to use `add` instead, and retries automatically.
+6. **Review & confirm** — you see the patch and a before/after diff before
+   anything is written.
 
 ---
 
