@@ -13,33 +13,33 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from context_extractor import (
     _MAX_ARRAY_ITEMS,
     _MAX_PATH_ENTRIES,
-    _enumerate_paths,
+    enumerate_paths,
     extract_context,
 )
 
 
 # ---------------------------------------------------------------------------
-# _enumerate_paths
+# enumerate_paths
 # ---------------------------------------------------------------------------
 
 
-def test_enumerate_paths_flat_dict():
+def testenumerate_paths_flat_dict():
     config = {"a": 1, "b": "x"}
-    result = _enumerate_paths(config)
+    result = enumerate_paths(config)
     assert any("/a = 1" in line for line in result)
     assert any('/b = "x"' in line for line in result)
 
 
-def test_enumerate_paths_nested_dict():
+def testenumerate_paths_nested_dict():
     config = {"project": {"name": "foo", "version": "1.0"}}
-    result = _enumerate_paths(config)
+    result = enumerate_paths(config)
     assert any('/project/name = "foo"' in line for line in result)
     assert any('/project/version = "1.0"' in line for line in result)
 
 
-def test_enumerate_paths_array_limited():
+def testenumerate_paths_array_limited():
     config = {"items": [{"id": i} for i in range(20)]}
-    result = _enumerate_paths(config)
+    result = enumerate_paths(config)
     # First _MAX_ARRAY_ITEMS indices should appear
     for i in range(_MAX_ARRAY_ITEMS):
         assert any(f"/items/{i}/id" in line for line in result), f"Expected /items/{i}/id"
@@ -49,31 +49,31 @@ def test_enumerate_paths_array_limited():
     assert any("items" in line and "items" in line and "shown" in line for line in result)
 
 
-def test_enumerate_paths_max_paths_cap():
+def testenumerate_paths_max_paths_cap():
     # Build a wide, flat config with more than _MAX_PATH_ENTRIES leaf keys
     config = {f"key_{i}": i for i in range(_MAX_PATH_ENTRIES + 50)}
-    result = _enumerate_paths(config)
+    result = enumerate_paths(config)
     # At most max_paths entries + 1 sentinel line
     assert len(result) <= _MAX_PATH_ENTRIES + 1
     # Last line should be the truncation sentinel
     assert "truncated" in result[-1]
 
 
-def test_enumerate_paths_scalar_values_inline():
+def testenumerate_paths_scalar_values_inline():
     config = {
         "start_date": "2024-01-01",
         "count": 42,
         "active": True,
     }
-    result = _enumerate_paths(config)
+    result = enumerate_paths(config)
     assert any('/start_date = "2024-01-01"' in line for line in result)
     assert any("/count = 42" in line for line in result)
     assert any("/active = true" in line for line in result)
 
 
-def test_enumerate_paths_empty_config():
-    assert _enumerate_paths({}) == []
-    assert _enumerate_paths([]) == []
+def testenumerate_paths_empty_config():
+    assert enumerate_paths({}) == []
+    assert enumerate_paths([]) == []
 
 
 # ---------------------------------------------------------------------------

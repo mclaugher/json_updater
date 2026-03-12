@@ -241,3 +241,102 @@ def test_skill_names_filter():
             skill_names=["nonexistent"],
         )
         assert engine_without.active_skill_names() == []
+
+
+# ---------------------------------------------------------------------------
+# Analysis pass tests
+# ---------------------------------------------------------------------------
+
+# Config used by analysis tests — has a start_date field the user calls "date"
+ANALYSIS_CONFIG = {
+    "project": {"name": "acme", "start_date": "2024-01-01", "version": "2.0"},
+    "settings": {"enabled": True},
+}
+
+ANALYSIS_PATCH = [{"op": "replace", "path": "/project/start_date", "value": "2025-06-01"}]
+
+
+def _make_analysis_engine(analysis_response: dict, patch_response: list[dict]) -> PatchEngine:
+    """Engine where call 1 returns analysis_response and call 2 returns patch_response."""
+    with tempfile.NamedTemporaryFile(suffix=".json", mode="w", delete=False) as f:
+        json.dump(ANALYSIS_CONFIG, f)
+        tmp_path = Path(f.name)
+
+    engine = PatchEngine(
+        config_paths=[tmp_path],
+        model="gemma2:9b",
+        host="http://localhost:11434",
+        project_dir=Path(tempfile.gettempdir()),
+    )
+    engine._tmp_path = tmp_path
+    engine.ollama = MagicMock()
+    engine.ollama.chat.side_effect = [analysis_response, patch_response]
+    return engine
+
+
+def test_analyse_returns_relevant_paths():
+    """Analysis pass identifies correct path; patch generation uses it."""
+    analysis = {"relevant_paths": ["/project/start_date"], "reasoning": "start_date is the date field"}
+    engine = _make_analysis_engine(analysis, ANALYSIS_PATCH)
+    try:
+        result = engine.run("update the date to 2025-06-01")
+        assert result.success, result.errors
+        assert result.patch == ANALYSIS_PATCH
+        # The excerpt fed to the patch call should contain start_date's parent subtree
+        call2_user_msg = engine.ollama.chat.call_args_list[1][1]["user"]
+        assert "start_date" in call2_user_msg
+    finally:
+        engine._tmp_path.unlink(missing_ok=True)
+
+
+def test_analyse_fallback_on_empty_paths():
+    """When analysis returns no relevant paths, engine falls back to extract_context."""
+    analysis = {"relevant_paths": [], "reasoning": "nothing matched"}
+    engine = _make_analysis_engine(analysis, ANALYSIS_PATCH)
+    try:
+        result = engine.run("update the date to 2025-06-01")
+        assert result.success, result.errors
+    finally:
+        engine._tmp_path.unlink(missing_ok=True)
+
+
+def test_analyse_fallback_on_ollama_error():
+    """When the analysis call raises OllamaError, engine falls back gracefully."""
+    from ollama_client import OllamaError
+
+    with tempfile.NamedTemporaryFile(suffix=".json", mode="w", delete=False) as f:
+        json.dump(ANALYSIS_CONFIG, f)
+        tmp_path = Path(f.name)
+
+    engine = PatchEngine(
+        config_paths=[tmp_path],
+        model="gemma2:9b",
+        host="http://localhost:11434",
+        project_dir=Path(tempfile.gettempdir()),
+    )
+    engine._tmp_path = tmp_path
+    engine.ollama = MagicMock()
+    engine.ollama.chat.side_effect = [OllamaError("timeout"), ANALYSIS_PATCH]
+    try:
+        result = engine.run("update the date")
+        assert result.success, result.errors
+    finally:
+        engine._tmp_path.unlink(missing_ok=True)
+
+
+def test_analyse_rejects_hallucinated_paths():
+    """Paths returned by analysis that don't exist in the inventory are filtered out."""
+    analysis = {
+        "relevant_paths": ["/nonexistent/field", "/also/fake"],
+        "reasoning": "hallucinated",
+    }
+    engine = _make_analysis_engine(analysis, ANALYSIS_PATCH)
+    try:
+        # All analysed paths are fake → engine falls back to extract_context
+        result = engine.run("update something")
+        # Engine should still succeed (fallback excerpt + valid patch on call 2)
+        assert result.success, result.errors
+        # Second call must still have been made (fallback path ran)
+        assert engine.ollama.chat.call_count == 2
+    finally:
+        engine._tmp_path.unlink(missing_ok=True)

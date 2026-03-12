@@ -151,7 +151,7 @@ def _trim_list_to_budget(items: list) -> list:
     return items
 
 
-def _enumerate_paths(
+def enumerate_paths(
     node: Any,
     prefix: str = "",
     max_paths: int = _MAX_PATH_ENTRIES,
@@ -215,7 +215,7 @@ def _build_context_summary(config: dict | list, schema_summary: str) -> str:
 
     lines.append("")
     lines.append("Available JSON paths (use these verbatim as patch path values):")
-    for entry in _enumerate_paths(config):
+    for entry in enumerate_paths(config):
         lines.append(f"  {entry}")
 
     return "\n".join(lines)

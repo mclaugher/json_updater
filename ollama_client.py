@@ -33,10 +33,10 @@ class OllamaError(Exception):
 class OllamaClient:
     """Thin wrapper around Ollama's /api/chat endpoint.
 
-    Sends a two-message conversation (system + user) and asks Ollama to
-    constrain its output to a caller-supplied JSON Schema via the ``format``
-    parameter.  The response content is JSON-decoded and returned as a Python
-    object.
+    Sends a two-message conversation (system + user) and optionally asks
+    Ollama to constrain its output to a caller-supplied JSON Schema via the
+    ``format`` parameter.  The response content is JSON-decoded and returned
+    as a Python object.
 
     Args:
         model: Name of the Ollama model to use (e.g. ``"gemma2:9b"``).
@@ -73,37 +73,39 @@ class OllamaClient:
         self,
         system: str,
         user: str,
-        format_schema: dict,
+        format_schema: dict | None = None,
     ) -> Any:
         """Send a chat request to Ollama and return the parsed JSON response.
 
         Args:
             system: System prompt text.
             user: User message text.
-            format_schema: A JSON Schema dict used as Ollama's ``format``
-                parameter to enforce structured output.  Top-level meta-keys
-                (``$schema``, ``$id``, etc.) are stripped from the copy sent
-                to Ollama because some versions reject them.
+            format_schema: Optional JSON Schema dict used as Ollama's
+                ``format`` parameter to enforce structured output.  When
+                ``None``, the ``format`` key is omitted and the model may
+                return free-form text (still JSON-decoded on return).
+                Top-level meta-keys (``$schema``, ``$id``, etc.) are stripped
+                from the copy sent to Ollama because some versions reject them.
 
         Returns:
             The parsed Python object produced by the model (list or dict
-            matching ``format_schema``).
+            matching ``format_schema``, or any JSON value when unconstrained).
 
         Raises:
             OllamaError: If the request fails or the response cannot be
                 parsed after all retries.
         """
-        clean_schema = _strip_meta_keys(format_schema)
-        payload = {
+        payload: dict = {
             "model": self.model,
             "messages": self._build_messages(system, user),
             "stream": False,
-            "format": clean_schema,
             "options": {
                 # Keep temperature low for deterministic patch generation.
                 "temperature": 0.1,
             },
         }
+        if format_schema is not None:
+            payload["format"] = _strip_meta_keys(format_schema)
 
         last_exc: Exception | None = None
         for attempt in range(1, _MAX_RETRIES + 2):  # 1 initial + _MAX_RETRIES retries

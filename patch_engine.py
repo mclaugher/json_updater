@@ -18,7 +18,7 @@ import jsonpatch
 import jsonschema
 from jsonpointer import JsonPointerException, resolve_pointer
 
-from context_extractor import extract_context
+from context_extractor import enumerate_paths, extract_context
 from ollama_client import OllamaClient
 from patch_schema import OLLAMA_PATCH_ARRAY_SCHEMA, PATCH_ARRAY_SCHEMA, validate_patch
 from schema_infer import load_and_infer, summarize_schema
@@ -108,6 +108,52 @@ Output a corrected JSON patch array that fixes every error listed.\
 """
 
 _MISSING = object()  # sentinel for "path not found"
+
+# ---------------------------------------------------------------------------
+# Analysis pass — schema, system prompt, and user template
+# ---------------------------------------------------------------------------
+
+# JSON Schema for the analysis response.  Simpler than OLLAMA_PATCH_ARRAY_SCHEMA;
+# sent as format_schema in Pass 1 so the model returns structured path selections.
+ANALYSIS_SCHEMA: dict = {
+    "type": "object",
+    "required": ["relevant_paths", "reasoning"],
+    "properties": {
+        "relevant_paths": {
+            "type": "array",
+            "items": {"type": "string"},
+        },
+        "reasoning": {"type": "string"},
+    },
+    "additionalProperties": False,
+}
+
+_ANALYSIS_SYSTEM = """\
+You are analyzing a JSON configuration to determine which fields need to change.
+You will be given a path inventory — a complete list of every JSON Pointer that
+exists in the config, with its current value.
+
+Output ONLY a JSON object with:
+  "relevant_paths": list of JSON Pointer strings from the inventory that must
+                    change to fulfil the instruction. Copy paths EXACTLY as they
+                    appear in the inventory — do not shorten, paraphrase, or invent.
+  "reasoning":      one sentence explaining your interpretation of the instruction.
+
+Do NOT generate patch operations. Do NOT include paths that do not need to change.
+If no paths match the intent, return an empty list for relevant_paths.
+"""
+
+_ANALYSIS_USER_TMPL = """\
+=== INSTRUCTION ===
+{instruction}
+
+=== JSON PATH INVENTORY ===
+{path_inventory}
+
+=== YOUR TASK ===
+From the paths listed above, identify which JSON Pointer strings must change
+to fulfil the instruction. Return only paths that appear verbatim in the inventory.\
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -207,14 +253,16 @@ class PatchEngine:
         and decides whether to persist the patched config.
 
         Steps:
-          1. extract_context → json_excerpt, context_summary
-          2. Build system prompt (generic rules + skill instructions + examples)
-          3. Call Ollama with PATCH_ARRAY_SCHEMA as the format constraint
-          4. validate_patch (patch schema check)
-          5. Apply patch with jsonpatch to an in-memory copy
-          6. Validate patched copy against inferred schema + custom validators
-          7. On any failure: build error_report, retry once
-          8. Return ApplyResult
+          1. Analysis pass: call Ollama with path inventory → relevant_paths
+          2. Build json_excerpt from relevant_paths (fallback: extract_context)
+          3. Build context_summary (always via extract_context)
+          4. Build system prompt (generic rules + skill instructions + examples)
+          5. Call Ollama with PATCH_ARRAY_SCHEMA as the format constraint
+          6. validate_patch (patch schema check)
+          7. Apply patch with jsonpatch to an in-memory copy
+          8. Validate patched copy against inferred schema + custom validators
+          9. On any failure: build error_report, retry once
+         10. Return ApplyResult
 
         Args:
             instruction: Natural-language edit instruction.
@@ -225,8 +273,17 @@ class PatchEngine:
         target_name, target_config = next(iter(self.configs.items()))
         working_copy = _deep_copy(target_config)
 
-        # ── Step 1: Context extraction ──────────────────────────────────────
-        json_excerpt, context_summary = extract_context(working_copy, instruction)
+        # ── Step 1: Analysis pass → identify relevant paths ─────────────────
+        relevant_paths = self._analyse(instruction, working_copy)
+
+        if relevant_paths:
+            json_excerpt = _excerpt_from_paths(relevant_paths, working_copy)
+        else:
+            # Fallback: keyword-based extraction (existing behaviour)
+            json_excerpt, _ = extract_context(working_copy, instruction)
+
+        # context_summary always built the same way (includes full path inventory)
+        _, context_summary = extract_context(working_copy, instruction)
 
         # ── Step 2: Prompts ─────────────────────────────────────────────────
         system_prompt = self._build_system_prompt()
@@ -335,6 +392,58 @@ class PatchEngine:
         """Return the stem names of all active skill files."""
         return [s.path.stem for s in self.skills]
 
+    def _analyse(self, instruction: str, config: dict | list) -> list[str]:
+        """Pass 1: ask the model which paths need to change.
+
+        Sends the instruction and a compact path inventory (not raw JSON) to
+        Ollama with ``ANALYSIS_SCHEMA`` as the format constraint.  Returns a
+        list of JSON Pointer strings that exist in the inventory.
+
+        On any error or when the model returns no matching paths, returns
+        ``[]`` so the caller falls back to keyword-based extraction.
+
+        Args:
+            instruction: Natural-language edit instruction.
+            config: The in-memory config to analyse.
+
+        Returns:
+            List of validated JSON Pointer strings, possibly empty.
+        """
+        inventory_lines = enumerate_paths(config)
+        inventory_set = set()
+        for line in inventory_lines:
+            # Each line is "/some/path = value" or "/some/array/… (N items…)"
+            ptr = line.split(" =")[0].split(" (")[0].strip()
+            if ptr:
+                inventory_set.add(ptr)
+
+        path_inventory = "\n".join(inventory_lines)
+        user_msg = _ANALYSIS_USER_TMPL.format(
+            instruction=instruction,
+            path_inventory=path_inventory,
+        )
+
+        try:
+            result = self.ollama.chat(
+                system=_ANALYSIS_SYSTEM,
+                user=user_msg,
+                format_schema=ANALYSIS_SCHEMA,
+            )
+            raw_paths: list = result.get("relevant_paths", []) if isinstance(result, dict) else []
+            reasoning: str = result.get("reasoning", "") if isinstance(result, dict) else ""
+            if reasoning:
+                logger.debug("Analysis reasoning: %s", reasoning)
+
+            # Validate: keep only paths that appear verbatim in the inventory
+            valid = [p for p in raw_paths if isinstance(p, str) and p in inventory_set]
+            if not valid:
+                logger.info("Analysis returned no valid paths; falling back to excerpt extraction.")
+            return valid
+
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Analysis pass failed (%s); falling back to excerpt extraction.", exc)
+            return []
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
@@ -435,6 +544,58 @@ class PatchEngine:
 def _deep_copy(obj: Any) -> Any:
     """Deep copy via JSON round-trip (safe for all JSON-serialisable data)."""
     return json.loads(json.dumps(obj))
+
+
+def _excerpt_from_paths(
+    paths: list[str],
+    config: dict | list,
+    max_lines: int = 50,
+) -> dict | list:
+    """Build a JSON excerpt by resolving each path to its immediate parent subtree.
+
+    For each path, strips the last ``/segment`` to obtain the parent pointer,
+    then collects that parent's value.  Results are merged into a single dict
+    keyed by top-level key and trimmed to *max_lines* lines of JSON.
+
+    Args:
+        paths: List of JSON Pointer strings identified by the analysis pass.
+        config: The full in-memory config.
+        max_lines: Maximum JSON lines in the returned excerpt.
+
+    Returns:
+        A dict (or list if *config* is a list) containing the relevant subtrees.
+    """
+    excerpt: dict = {}
+    for ptr in paths:
+        # Derive the parent pointer by stripping the last segment.
+        parts = ptr.rsplit("/", 1)
+        parent_ptr = parts[0] if len(parts) == 2 and parts[0] else ""
+
+        try:
+            parent_val = resolve_pointer(config, parent_ptr) if parent_ptr else config
+        except Exception:
+            parent_val = None
+
+        if parent_val is None:
+            continue
+
+        # Key the subtree by the top-level key (first segment of the ptr).
+        top_key = ptr.lstrip("/").split("/")[0]
+        if top_key and isinstance(config, dict) and top_key in config:
+            excerpt[top_key] = config[top_key]
+
+    if not excerpt and isinstance(config, dict):
+        # Safety fallback: include first key
+        first_key = next(iter(config), None)
+        if first_key:
+            excerpt[first_key] = config[first_key]
+
+    # Trim to budget
+    keys = list(excerpt.keys())
+    while len(json.dumps(excerpt, indent=2).splitlines()) > max_lines and keys:
+        del excerpt[keys.pop()]
+
+    return excerpt if excerpt else (config if isinstance(config, list) else {})
 
 
 def _enrich_apply_error(
